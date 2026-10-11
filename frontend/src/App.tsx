@@ -146,7 +146,7 @@ export default function App() {
             addLog(`${kind.toUpperCase()}: ${message}`, "error");
           }
         } else {
-          addLog("Kein Scanner gefunden — Gerät anschließen und einschalten.", "warn");
+          addLog("Kein Scanner gefunden. Gerät anschließen und einschalten.", "warn");
         }
       }
     } catch (error) {
