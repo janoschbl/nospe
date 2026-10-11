@@ -9,7 +9,7 @@ import {
 import {
   getHealth,
   getProfiles,
-  getTwainStatus,
+  getScanners,
   getSettings,
   saveSettings,
   scanDocument,
@@ -48,6 +48,32 @@ async function getHealthWithRetry() {
   throw lastError;
 }
 
+/**
+ * Wählt den anzuzeigenden Scanner: erster passender Kandidat, sonst der erste der Liste.
+ * Alte Einstellungen speichern nur den TWAIN-Namen ("EPSON DS-410"), neue die volle ID
+ * ("twain:EPSON DS-410"); beides wird erkannt. Ein Gerät, das nur noch als zweiter
+ * Zugang (also_via) existiert, zählt ebenfalls.
+ */
+function resolveScannerId(list: Scanner[], ...candidates: Array<string | null | undefined>): string {
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const hit = list.find(
+      (scanner) =>
+        scanner.id === candidate ||
+        scanner.id === `twain:${candidate}` ||
+        scanner.also_via.includes(candidate),
+    );
+    if (hit) return hit.id;
+  }
+  return list[0]?.id ?? "";
+}
+
+function sameScannerList(a: Scanner[], b: Scanner[]): boolean {
+  return a.length === b.length && a.every((scanner, index) => scanner.id === b[index].id);
+}
+
+const SCANNER_POLL_MS = 5000;
+
 export default function App() {
   const [status, setStatus] = useState<"checking" | "online" | "offline">("checking");
   const [version, setVersion] = useState<string>("");
@@ -60,6 +86,7 @@ export default function App() {
   const [scannerId, setScannerId] = useState<string>("");
   const [lastScan, setLastScan] = useState<ScanResponse | null>(null);
 
+  const scannersRef = useRef<Scanner[]>([]);
   const [log, setLog] = useState<LogEntry[]>([]);
   const logId = useRef(0);
   const [loading, setLoading] = useState(true);
@@ -89,22 +116,15 @@ export default function App() {
       const health = await getHealthWithRetry();
       setStatus(health.ok ? "online" : "offline");
       setVersion(health.version);
-      const [profilesRes, settingsRes, twainRes] =
-        await Promise.all([getProfiles(), getSettings(), getTwainStatus()]);
-      const scannersRes = twainRes.sources.map((name) => ({ id: name, name }));
-      setScanners(scannersRes);
+      const [profilesRes, settingsRes, scannersRes] =
+        await Promise.all([getProfiles(), getSettings(), getScanners(true)]);
+      const scannerList = scannersRes.scanners;
+      scannersRef.current = scannerList;
+      setScanners(scannerList);
       setProfiles(profilesRes);
       setSettings(settingsRes);
-      const fallbackScannerId =
-        (settingsRes.selected_scanner_id && scannersRes.some(
-          (scanner) => scanner.id === settingsRes.selected_scanner_id,
-        )
-          ? settingsRes.selected_scanner_id
-          : scannersRes[0]?.id) ?? "";
-      setScannerId((cur) => {
-        if (cur && scannersRes.some((scanner) => scanner.id === cur)) return cur;
-        return fallbackScannerId;
-      });
+      const fallbackScannerId = resolveScannerId(scannerList, settingsRes.selected_scanner_id);
+      setScannerId((cur) => resolveScannerId(scannerList, cur, fallbackScannerId));
       if (fallbackScannerId && settingsRes.selected_scanner_id !== fallbackScannerId) {
         void saveSettings({
           scan_output_dir: settingsRes.scan_output_dir,
@@ -117,31 +137,18 @@ export default function App() {
       }
       setProfileId((cur) => cur || profilesRes[0]?.id || "");
       addLog(`Backend verbunden v${health.version}`, "success");
-      const tw = twainRes;
-        if (tw.error) {
-          addLog(`TWAIN: ${tw.error}`, "error");
-        } else if (tw.source_count === 0) {
-          addLog(
-            "Kein TWAIN-Scanner (64-bit) — siehe docs/TWAIN_SETUP.md",
-            "warn",
-          );
+      if (scannerList.length > 0) {
+        addLog(`${scannerList.length} Scanner gefunden`, "success");
+      } else {
+        const problems = Object.entries(scannersRes.errors);
+        if (problems.length > 0) {
+          for (const [kind, message] of problems) {
+            addLog(`${kind.toUpperCase()}: ${message}`, "error");
+          }
         } else {
-          addLog(`TWAIN: ${tw.source_count} Quelle(n) gefunden`, "success");
-          setLog((prev) =>
-            prev.filter(
-              (e) =>
-                e.level !== "warn" ||
-                (!e.message.includes("verify_twain") &&
-                  !e.message.includes("TWACKER") &&
-                  !e.message.includes("TWAIN_SETUP") &&
-                  !e.message.includes("Kein TWAIN-Scanner")),
-            ),
-          );
+          addLog("Kein Scanner gefunden — Gerät anschließen und einschalten.", "warn");
         }
-        const hint = tw.hints[0];
-        if (hint && tw.source_count === 0) {
-          addLog(hint, "warn");
-        }
+      }
     } catch (error) {
       setStatus("offline");
       setScanners([]);
@@ -156,6 +163,44 @@ export default function App() {
   useEffect(() => {
     void loadAll();
   }, [loadAll]);
+
+  // Scanner im Hintergrund nachladen: angeschlossene und entfernte Geräte
+  // (USB, WIA, Netzwerk) erscheinen ohne Neustart der App.
+  const refreshScanners = useCallback(async () => {
+    try {
+      const { scanners: next } = await getScanners();
+      const previous = scannersRef.current;
+      if (sameScannerList(previous, next)) return;
+      scannersRef.current = next;
+      setScanners(next);
+      setScannerId((cur) => resolveScannerId(next, cur));
+      for (const scanner of next) {
+        if (!previous.some((old) => old.id === scanner.id)) {
+          addLog(`Scanner verbunden: ${scanner.name}`, "success");
+        }
+      }
+      for (const scanner of previous) {
+        if (!next.some((fresh) => fresh.id === scanner.id)) {
+          addLog(`Scanner getrennt: ${scanner.name}`, "warn");
+        }
+      }
+    } catch {
+      // Backend kurz nicht erreichbar (z. B. während eines Scans): alte Liste behalten.
+    }
+  }, [addLog]);
+
+  useEffect(() => {
+    if (status !== "online") return undefined;
+    const tick = () => {
+      if (!document.hidden) void refreshScanners();
+    };
+    const timer = window.setInterval(tick, SCANNER_POLL_MS);
+    window.addEventListener("focus", tick);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", tick);
+    };
+  }, [status, refreshScanners]);
 
   const handleScan = useCallback(
     async (request: ScanRequest): Promise<ScanResponse> => {
@@ -228,15 +273,13 @@ export default function App() {
     return result;
   }, []);
 
-  const effectiveScannerId = scanners.some((scanner) => scanner.id === scannerId)
-    ? scannerId
-    : scanners[0]?.id ?? "";
+  const effectiveScannerId = resolveScannerId(scanners, scannerId);
 
   const activeScanner =
     scanners.find((s) => s.id === effectiveScannerId)?.name ??
     (scanners.length === 0
       ? status === "online"
-        ? "Kein TWAIN-Scanner (64-bit)"
+        ? "Kein Scanner gefunden"
         : "Kein Scanner"
       : "Scanner");
 

@@ -52,3 +52,39 @@ def test_secret_from_environment_is_used(monkeypatch, tmp_path):
     )
     server.run.call_args.kwargs["sockets"][0].close()
     assert security.get_config().secret == "x" * 24
+
+
+def test_parent_watchdog_exits_backend_when_starter_disappears():
+    import threading
+
+    exited = threading.Event()
+    codes = []
+
+    thread = run_backend.start_parent_watchdog(
+        4242,
+        wait=lambda pid: codes.append(("waited", pid)),
+        on_gone=lambda code: (codes.append(("exit", code)), exited.set()),
+    )
+    assert exited.wait(2)
+    thread.join(2)
+    assert codes == [("waited", 4242), ("exit", 0)]
+
+
+def test_watchdog_is_started_only_with_parent_pid(monkeypatch, tmp_path):
+    with patch("run_backend.start_parent_watchdog") as watchdog:
+        _run_main(monkeypatch, tmp_path, NOSPE_API_PORT="0")
+    watchdog.assert_not_called()
+
+    monkeypatch.setenv("NOSPE_PARENT_PID", "1234")
+    with patch("run_backend.start_parent_watchdog") as watchdog:
+        server, *_ = _run_main(monkeypatch, tmp_path, NOSPE_API_PORT="0", NOSPE_PARENT_PID="1234")
+    watchdog.assert_called_once_with(1234)
+
+
+def test_wait_for_process_exit_returns_once_process_is_gone():
+    import subprocess
+    import sys
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    run_backend.wait_for_process_exit(child.pid)  # darf nicht hängen

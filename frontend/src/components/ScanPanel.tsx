@@ -42,6 +42,12 @@ import type {
   Scanner,
 } from "../types";
 
+const SCANNER_KIND_LABEL: Record<Scanner["kind"], string> = {
+  twain: "TWAIN",
+  wia: "WIA",
+  escl: "Netzwerk",
+};
+
 /** Veraltete TWAIN-Setup-Hinweise nicht als Hauptstatus zeigen, wenn Scanner schon da sind. */
 function isStaleTwainSetupLog(
   entry: LogEntry,
@@ -704,7 +710,7 @@ function ScannerDropdown({
                   backendState === "checking"
                     ? "Verbinde…"
                     : backendState === "online"
-                      ? "Kein TWAIN-Scanner"
+                      ? "Kein Scanner gefunden"
                       : "Kein Scanner"
                 }
               />
@@ -715,6 +721,7 @@ function ScannerDropdown({
           {scanners.map((scanner) => (
             <SelectItem key={scanner.id} value={scanner.id}>
               {scanner.name}
+              <span className="ml-2 text-xs text-muted-foreground">{SCANNER_KIND_LABEL[scanner.kind]}</span>
             </SelectItem>
           ))}
           {scanners.length === 0 && (

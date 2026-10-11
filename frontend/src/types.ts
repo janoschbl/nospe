@@ -4,9 +4,15 @@
 
 export type ColorMode = "gray" | "color" | "bw";
 
+export type ScannerKind = "twain" | "wia" | "escl";
+
 export type Scanner = {
+  /** Stabil und eindeutig, z. B. `twain:EPSON DS-410`, `wia:{…}`, `escl:<UUID>`. */
   id: string;
   name: string;
+  kind: ScannerKind;
+  /** Weitere Zugänge zum selben Gerät (z. B. WIA, wenn TWAIN bevorzugt wurde). */
+  also_via: string[];
 };
 
 export type ScanProfile = {
@@ -102,6 +108,12 @@ export type HealthResponse = {
 
 export type ScannersResponse = {
   scanners: Scanner[];
+  /** Unix-Zeit des letzten Suchlaufs; null, solange noch nie gesucht wurde. */
+  updated_at: number | null;
+  /** Während eines Scans ist die Liste der Stand davor. */
+  scanning: boolean;
+  /** Fehler je Zugangsart, z. B. { twain: "TWAIN DSM nicht ladbar" }. */
+  errors: Record<string, string>;
 };
 
 export type TwainStatusResponse = {

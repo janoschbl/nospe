@@ -18,7 +18,10 @@ from __future__ import annotations
 import os
 import socket
 import sys
+import threading
+import time
 from pathlib import Path
+from typing import Callable
 
 import uvicorn
 
@@ -49,7 +52,57 @@ def write_handshake(path: Path, port: int, secret: str) -> None:
     os.replace(tmp, path)
 
 
+def wait_for_process_exit(pid: int) -> None:
+    """Blockiert, bis der Prozess ``pid`` beendet ist."""
+    if sys.platform == "win32":
+        import ctypes
+
+        synchronize, infinite = 0x00100000, 0xFFFFFFFF
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.OpenProcess(synchronize, False, pid)
+        if not handle:
+            return  # Prozess existiert nicht mehr
+        try:
+            kernel32.WaitForSingleObject(handle, infinite)
+        finally:
+            kernel32.CloseHandle(handle)
+        return
+    while True:
+        try:
+            os.kill(pid, 0)  # POSIX: Signal 0 prüft nur, ob der Prozess existiert
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            pass  # existiert, gehört aber jemand anderem
+        time.sleep(2)
+
+
+def start_parent_watchdog(
+    pid: int,
+    *,
+    wait: Callable[[int], None] = wait_for_process_exit,
+    on_gone: Callable[[int], None] = os._exit,
+) -> threading.Thread:
+    """Beendet das Backend, sobald der Starter (Tauri) weg ist.
+
+    PyInstaller-onefile startet einen Kindprozess; wird nur der Bootloader
+    beendet, bliebe das Backend sonst mit offenem Port als Waise zurück.
+    """
+
+    def watch() -> None:
+        wait(pid)
+        on_gone(0)
+
+    thread = threading.Thread(target=watch, name="parent-watchdog", daemon=True)
+    thread.start()
+    return thread
+
+
 def main() -> None:
+    parent_pid = os.environ.get("NOSPE_PARENT_PID", "").strip()
+    if parent_pid.isdigit():
+        start_parent_watchdog(int(parent_pid))
+
     handshake = os.environ.get("NOSPE_HANDSHAKE_FILE", "").strip()
     secret = os.environ.get("NOSPE_API_SECRET", "").strip()
     generated = not secret

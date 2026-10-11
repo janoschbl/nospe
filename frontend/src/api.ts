@@ -1,3 +1,5 @@
+import { invoke } from "@tauri-apps/api/core";
+
 import type {
   AppSettings,
   HealthResponse,
@@ -8,12 +10,37 @@ import type {
   ScanResponse,
   ScannersResponse,
   ScanProfile,
-  Scanner,
   TwainStatusResponse,
 } from "./types";
 
-export const API_BASE_URL = "http://127.0.0.1:8765";
 const DEFAULT_TIMEOUT_MS = 2500;
+const TOKEN_HEADER = "X-Nospe-Token";
+
+type BackendConfig = { baseUrl: string; secret: string };
+
+let backendConfig: Promise<BackendConfig> | null = null;
+
+/**
+ * Port und Secret des Backends. In der App kommen sie von Tauri (pro Start
+ * zufällig). Im reinen Vite-Dev-Server (ohne Tauri) aus VITE_NOSPE_API_URL und
+ * VITE_NOSPE_API_SECRET, siehe DEVELOPMENT.md.
+ */
+function getBackendConfig(): Promise<BackendConfig> {
+  if (!backendConfig) {
+    const load =
+      "__TAURI_INTERNALS__" in window
+        ? invoke<BackendConfig>("backend_config")
+        : Promise.resolve({
+            baseUrl: import.meta.env.VITE_NOSPE_API_URL ?? "http://127.0.0.1:8765",
+            secret: import.meta.env.VITE_NOSPE_API_SECRET ?? "",
+          });
+    backendConfig = load.catch((error) => {
+      backendConfig = null; // Backend war noch nicht bereit → beim nächsten Aufruf neu versuchen
+      throw error;
+    });
+  }
+  return backendConfig;
+}
 
 async function requestJson<T>(
   path: string,
@@ -23,10 +50,15 @@ async function requestJson<T>(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`${API_BASE_URL}${path}`, {
+    const config = await getBackendConfig();
+    const response = await fetch(`${config.baseUrl}${path}`, {
       ...init,
       signal: controller.signal,
-      headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+      headers: {
+        "Content-Type": "application/json",
+        [TOKEN_HEADER]: config.secret,
+        ...(init?.headers ?? {}),
+      },
     });
     if (!response.ok) {
       let detail = "";
@@ -57,9 +89,13 @@ export function getHealth() {
   return requestJson<HealthResponse>("/health");
 }
 
-export async function getScanners(): Promise<Scanner[]> {
-  const data = await requestJson<ScannersResponse>("/scanners");
-  return data.scanners;
+/** Geräteliste aus dem Cache des Backends; `refresh` erzwingt eine neue Suche. */
+export function getScanners(refresh = false) {
+  return requestJson<ScannersResponse>(
+    refresh ? "/scanners?refresh=true" : "/scanners",
+    undefined,
+    refresh ? 15000 : DEFAULT_TIMEOUT_MS,
+  );
 }
 
 export function getTwainStatus() {

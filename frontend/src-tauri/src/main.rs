@@ -1,32 +1,61 @@
 // Nospe Tauri 2 Entry-Point.
 //
+// Das Python-Backend wird als Sidecar gestartet. Die UI erfährt Port und
+// Secret ausschließlich über das Tauri-Kommando `backend_config`; beides wird
+// bei jedem Start neu erzeugt (siehe backend/run_backend.py).
 #![cfg_attr(
     all(not(debug_assertions), target_os = "windows"),
     windows_subsystem = "windows"
 )]
 
-use std::fs::OpenOptions;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use tauri::Manager;
 
-struct BackendProcess(Mutex<Option<Child>>);
-struct BackendStartLock(Mutex<Option<std::path::PathBuf>>);
+// Der erste Start entpackt den PyInstaller-Sidecar und wird vom Virenscanner
+// geprüft; das kann deutlich länger als ein paar Sekunden dauern.
+const BACKEND_START_TIMEOUT: Duration = Duration::from_secs(60);
 
-fn backend_is_healthy() -> bool {
-    let Ok(mut stream) = TcpStream::connect("127.0.0.1:8765") else {
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackendConfig {
+    base_url: String,
+    secret: String,
+}
+
+struct BackendState {
+    config: Mutex<Option<BackendConfig>>,
+    child: Mutex<Option<Child>>,
+}
+
+#[tauri::command]
+fn backend_config(state: tauri::State<BackendState>) -> Result<BackendConfig, String> {
+    state
+        .config
+        .lock()
+        .map_err(|_| "backend state poisoned".to_string())?
+        .clone()
+        .ok_or_else(|| "backend not ready".to_string())
+}
+
+/// Fragt `/health` mit dem Secret ab. Ein fremder Prozess auf dem Port kennt
+/// das Secret nicht und besteht die Prüfung daher nicht.
+fn backend_is_healthy(port: u16, secret: &str) -> bool {
+    let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
         return false;
     };
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
-    if stream
-        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-        .is_err()
-    {
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let request = format!(
+        "GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Nospe-Token: {secret}\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
         return false;
     }
     let mut response = String::new();
@@ -35,78 +64,126 @@ fn backend_is_healthy() -> bool {
         && response.contains("\"ok\":true")
 }
 
-fn wait_for_backend() -> bool {
-    (0..50).any(|_| {
-        if backend_is_healthy() {
-            true
-        } else {
-            thread::sleep(Duration::from_millis(100));
-            false
+fn wait_until<T>(timeout: Duration, mut probe: impl FnMut() -> Option<T>) -> Option<T> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(value) = probe() {
+            return Some(value);
         }
-    })
+        if Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
-fn acquire_backend_start_lock() -> Result<Option<std::path::PathBuf>, String> {
-    let lock_path = std::env::temp_dir().join("nospe-backend-start.lock");
-    let open_lock = || OpenOptions::new().write(true).create_new(true).open(&lock_path);
-    match open_lock() {
-        Ok(_) => Ok(Some(lock_path)),
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-            // A forced shutdown can leave this file behind. Only replace a
-            // clearly stale lock, so concurrent normal starts still wait for
-            // the first sidecar instead of racing for the API port.
-            let is_stale = std::fs::metadata(&lock_path)
-                .ok()
-                .and_then(|metadata| metadata.modified().ok())
-                .and_then(|modified| modified.elapsed().ok())
-                .is_some_and(|age| age > Duration::from_secs(15));
-            if !is_stale {
-                return Ok(None);
-            }
-            let _ = std::fs::remove_file(&lock_path);
-            open_lock()
-                .map(|_| Some(lock_path))
-                .map_err(|error| format!("backend start lock unavailable: {error}"))
+/// Liest die Handshake-Datei des Backends: Zeile 1 = Port, Zeile 2 = Secret.
+fn read_handshake(path: &PathBuf) -> Option<(u16, String)> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut lines = content.lines();
+    let port = lines.next()?.trim().parse::<u16>().ok()?;
+    let secret = lines.next()?.trim().to_string();
+    if secret.len() < 16 {
+        return None;
+    }
+    Some((port, secret))
+}
+
+fn handshake_path() -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!("nospe-handshake-{}-{nanos}.txt", std::process::id()))
+}
+
+/// Entwicklung: ein manuell gestartetes Backend (`NOSPE_API_PORT` und
+/// `NOSPE_API_SECRET` gesetzt) wird genutzt, statt den Sidecar zu starten.
+fn external_backend() -> Option<(u16, String)> {
+    let port = std::env::var("NOSPE_API_PORT").ok()?.trim().parse::<u16>().ok()?;
+    let secret = std::env::var("NOSPE_API_SECRET").ok()?.trim().to_string();
+    if secret.is_empty() {
+        return None;
+    }
+    Some((port, secret))
+}
+
+fn start_sidecar(app: &tauri::App) -> Result<(Child, u16, String), String> {
+    let backend_path = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("resource directory unavailable: {error}"))?
+        .join("nospe-backend.exe");
+    if !backend_path.exists() {
+        return Err(format!(
+            "Nospe backend not found at {}. For development start the backend manually and set NOSPE_API_PORT and NOSPE_API_SECRET.",
+            backend_path.display()
+        ));
+    }
+    let handshake = handshake_path();
+    let mut child = Command::new(&backend_path)
+        .env("NOSPE_HANDSHAKE_FILE", &handshake)
+        // Das Backend beendet sich selbst, wenn dieser Prozess verschwindet
+        // (PyInstaller-onefile startet einen Kindprozess, den `kill()` nicht trifft).
+        .env("NOSPE_PARENT_PID", std::process::id().to_string())
+        .spawn()
+        .map_err(|error| format!("bundled Nospe backend could not be started: {error}"))?;
+
+    let published = wait_until(BACKEND_START_TIMEOUT, || {
+        if let Ok(Some(status)) = child.try_wait() {
+            // Sidecar ist schon wieder beendet: nicht weiter warten.
+            eprintln!("Nospe backend exited early: {status}");
+            return Some(None);
         }
-        Err(error) => Err(format!("backend start lock unavailable: {error}")),
+        read_handshake(&handshake).map(Some)
+    })
+    .flatten();
+    let _ = std::fs::remove_file(&handshake);
+
+    match published {
+        Some((port, secret)) => Ok((child, port, secret)),
+        None => {
+            let _ = child.kill();
+            Err("Nospe backend did not publish its port in time".to_string())
+        }
     }
 }
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(BackendProcess(Mutex::new(None)))
-        .manage(BackendStartLock(Mutex::new(None)))
+        .manage(BackendState {
+            config: Mutex::new(None),
+            child: Mutex::new(None),
+        })
+        .invoke_handler(tauri::generate_handler![backend_config])
         .setup(|app| {
-            let backend_path = app
-                .path()
-                .resource_dir()
-                .expect("resource directory unavailable")
-                .join("nospe-backend.exe");
-            // Reuse an already healthy sidecar. This prevents duplicate app
-            // launches from racing for the fixed local API port.
-            if !backend_is_healthy() && backend_path.exists() {
-                if let Some(lock_path) = acquire_backend_start_lock()
-                    .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?
-                {
-                    let child = Command::new(&backend_path)
-                        .spawn()
-                        .map_err(|error| format!("bundled Nospe backend could not be started: {error}"))?;
-                    app.state::<BackendProcess>()
-                        .0
+            let (port, secret) = match external_backend() {
+                Some(found) => found,
+                None => {
+                    let (child, port, secret) = start_sidecar(app)?;
+                    *app.state::<BackendState>()
+                        .child
                         .lock()
-                        .expect("backend state poisoned")
-                        .replace(child);
-                    app.state::<BackendStartLock>()
-                        .0
-                        .lock()
-                        .expect("backend lock state poisoned")
-                        .replace(lock_path);
+                        .expect("backend child state poisoned") = Some(child);
+                    (port, secret)
                 }
+            };
+
+            let healthy = wait_until(BACKEND_START_TIMEOUT, || {
+                backend_is_healthy(port, &secret).then_some(())
+            });
+            if healthy.is_none() {
+                return Err(format!("Nospe backend did not become healthy on 127.0.0.1:{port}").into());
             }
-            if !wait_for_backend() {
-                return Err("Nospe backend did not become healthy on 127.0.0.1:8765".into());
-            }
+
+            *app.state::<BackendState>()
+                .config
+                .lock()
+                .expect("backend config state poisoned") = Some(BackendConfig {
+                base_url: format!("http://127.0.0.1:{port}"),
+                secret,
+            });
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -114,22 +191,13 @@ fn main() {
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 if let Some(child) = app
-                    .state::<BackendProcess>()
-                    .0
+                    .state::<BackendState>()
+                    .child
                     .lock()
-                    .expect("backend state poisoned")
+                    .expect("backend child state poisoned")
                     .as_mut()
                 {
                     let _ = child.kill();
-                }
-                if let Some(lock_path) = app
-                    .state::<BackendStartLock>()
-                    .0
-                    .lock()
-                    .expect("backend lock state poisoned")
-                    .take()
-                {
-                    let _ = std::fs::remove_file(lock_path);
                 }
             }
         });
