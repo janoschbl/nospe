@@ -1,0 +1,138 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ---------------------------------------------------------------------------
+   Nospe — restrained product palette (Tailwind v4 / OKLCH)
+   Strategy: tinted cool-slate neutrals + one confident ink-blue brand accent.
+   Light mode only; identity carried by the ink accent, not by decoration.
+   Body / large text >= 4.5:1, status text tuned for AA on white.
+--------------------------------------------------------------------------- */
+:root {
+  --background: oklch(0.984 0.003 255);
+  --foreground: oklch(0.21 0.021 260);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.21 0.021 260);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.21 0.021 260);
+  --primary: oklch(0.4 0.072 258);
+  --primary-foreground: oklch(0.985 0.002 255);
+  --secondary: oklch(0.965 0.006 255);
+  --secondary-foreground: oklch(0.3 0.03 260);
+  --muted: oklch(0.965 0.006 255);
+  --muted-foreground: oklch(0.498 0.02 260);
+  --accent: oklch(0.965 0.006 255);
+  --accent-foreground: oklch(0.3 0.03 260);
+  --destructive: oklch(0.55 0.21 27.3);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(0.905 0.006 258);
+  --input: oklch(0.905 0.006 258);
+  --ring: oklch(0.55 0.07 258);
+  --success: oklch(0.55 0.12 158);
+  --success-foreground: oklch(0.985 0 0);
+  --warning: oklch(0.52 0.11 62);
+  --warning-foreground: oklch(0.985 0.01 62);
+  --radius: 0.625rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    border-color: var(--color-border);
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    margin: 0;
+    background: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    font-size: 13.5px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    color-scheme: light;
+  }
+  ::selection {
+    background: oklch(0.4 0.072 258 / 0.16);
+  }
+}
+
+/* Subtle desktop backdrop — premium feel without dashboard noise. */
+body {
+  background:
+    radial-gradient(
+      1100px 560px at 50% -25%,
+      oklch(0.95 0.012 258) 0%,
+      transparent 72%
+    ),
+    var(--color-background);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: oklch(0.85 0 0);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.7 0 0);
+  background-clip: padding-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

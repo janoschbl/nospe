@@ -1,0 +1,5 @@
+# Nospe Backend (MVP-Stub)
+# Minimal gehalten: nur was die Stub-Endpunkte brauchen.
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+pydantic==2.10.3

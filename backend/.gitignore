@@ -1,0 +1,6 @@
+.venv
+__pycache__/
+*.pyc
+
+# lokale Laufzeit-Daten (Settings inkl. Token)
+data/

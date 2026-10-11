@@ -1,0 +1,24 @@
+[project]
+name = "nospe-backend"
+version = "0.1.0"
+description = "Nospe FastAPI backend"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi==0.115.5",
+  "uvicorn[standard]==0.32.1",
+  "pydantic==2.10.3",
+  "python-multipart==0.0.20",
+  "pypdfium2==5.9.0",
+  "Pillow==11.0.0",
+  "pytest==8.3.4",
+  "httpx==0.28.1",
+  "pytwain>=2.3.0",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+  "pyinstaller==6.14.1",
+]
