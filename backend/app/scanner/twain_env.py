@@ -8,6 +8,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import Literal
 
+from .twain_lock import twain_session
+
 PythonBitness = Literal[32, 64]
 
 
@@ -32,8 +34,32 @@ def is_windows() -> bool:
     return sys.platform == "win32"
 
 
-def probe_twain_environment() -> TwainEnvironment:
-    """Prüft Plattform, Python-Bitness und ob der TWAIN DSM geladen werden kann."""
+_ready_cache: TwainEnvironment | None = None
+
+
+def reset_probe_cache() -> None:
+    global _ready_cache
+    _ready_cache = None
+
+
+def probe_twain_environment(*, blocking: bool = True) -> TwainEnvironment:
+    """Prüft Plattform, Python-Bitness und ob der TWAIN DSM geladen werden kann.
+
+    Ein erfolgreiches Ergebnis wird gemerkt (der DSM verschwindet nicht mehr),
+    Fehler werden jedes Mal neu geprüft, damit eine Nachinstallation greift.
+    ``blocking=False`` wirft ``TwainBusy``, wenn gerade gescannt wird.
+    """
+    global _ready_cache
+    if _ready_cache is not None:
+        return _ready_cache
+    with twain_session(blocking=blocking):
+        result = _probe_uncached()
+    if result.dsm_available:
+        _ready_cache = result
+    return result
+
+
+def _probe_uncached() -> TwainEnvironment:
     bitness = python_bitness()
     plat = platform.platform()
 

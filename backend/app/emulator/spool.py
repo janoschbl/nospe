@@ -15,6 +15,8 @@ from .models import EmulatorInactiveJob, EmulatorJob, EmulatorJobResponse, Emula
 DPI = 300
 COLOR_MODE = "color"
 DEFAULT_MAX_BYTES = 50 * 1024 * 1024
+MAX_PAGES = 200
+MAX_PAGE_PIXELS = 40_000_000  # ~A0 bei 300 DPI; schützt vor Speicher-DoS durch riesige MediaBoxen
 
 
 class EmulatorSpoolError(Exception):
@@ -146,8 +148,13 @@ def _render_pdf(pdf_path: Path, job_dir: Path, final_active: Path) -> list[Emula
     try:
         pdf = pdfium.PdfDocument(str(pdf_path))
         scale = DPI / 72
+        if len(pdf) > MAX_PAGES:
+            raise EmulatorSpoolError(f"Die PDF hat mehr als {MAX_PAGES} Seiten.")
         for index in range(len(pdf)):
             page = pdf[index]
+            width_pt, height_pt = page.get_size()
+            if width_pt * scale * height_pt * scale > MAX_PAGE_PIXELS:
+                raise EmulatorSpoolError("Eine Seite der PDF ist zu groß.")
             bitmap = page.render(scale=scale)
             image = bitmap.to_pil()
             if image.mode != "RGB":
@@ -165,6 +172,8 @@ def _render_pdf(pdf_path: Path, job_dir: Path, final_active: Path) -> list[Emula
             image.close()
             page.close()
         pdf.close()
+    except EmulatorSpoolError:
+        raise
     except Exception as exc:
         raise EmulatorSpoolError(f"PDF konnte nicht gerendert werden: {exc}") from exc
 

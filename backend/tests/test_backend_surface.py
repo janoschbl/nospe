@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from fastapi.testclient import TestClient
+from conftest import make_client
 
 from app.main import app
 from app import settings as settings_store
 
 
 def test_backend_does_not_serve_emulator_page():
-    client = TestClient(app)
+    client = make_client()
 
     response = client.get("/emulator")
 
@@ -18,7 +18,7 @@ def test_settings_persist_selected_scanner(tmp_path, monkeypatch):
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(settings_store, "_CONFIG_PATH", config_path)
     monkeypatch.setattr(settings_store, "_DATA_DIR", tmp_path)
-    client = TestClient(app)
+    client = make_client()
 
     response = client.post(
         "/settings",

@@ -3,15 +3,18 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from fastapi.testclient import TestClient
+from conftest import make_client
 from PIL import Image
 import pytest
 from twain.lowlevel import constants as twain_constants
 
 from app.main import app
-from app.models import ScanProfile, ScanRequest, Scanner
+from app.models import ScanProfile, ScanRequest
+from app.scanner.scanner_types import DiscoveredScanner
 from app.scanner import twain_scan
 from app.scanner.pdf_builder import images_to_pdf
+
+VIRTUAL = DiscoveredScanner(kind="twain", native_id="Nospe Virtual Scanner", name="Nospe Virtual Scanner")
 
 
 def test_resolve_output_path_avoids_collisions(tmp_path: Path):
@@ -43,14 +46,11 @@ def test_scan_endpoint_writes_pdf(tmp_path: Path):
 
     with (
         patch("app.scanner.profiles.find_profile", return_value=profile),
-        patch(
-            "app.scanner.profiles.get_scanners",
-            return_value=[Scanner(id="Nospe Virtual Scanner", name="Nospe Virtual Scanner")],
-        ),
-        patch("app.scanner.twain_scan.perform_scan", return_value=pdf_path),
+        patch("app.main.registry.resolve", return_value=VIRTUAL),
+        patch("app.main.scan_service.perform_scan", return_value=pdf_path),
         patch("app.settings.get_raw_settings", return_value={"scan_output_dir": str(tmp_path)}),
     ):
-        client = TestClient(app)
+        client = make_client()
         response = client.post(
             "/scan",
             json=ScanRequest(
@@ -81,14 +81,11 @@ def test_scan_endpoint_uses_requested_color_mode(tmp_path: Path):
 
     with (
         patch("app.scanner.profiles.find_profile", return_value=profile),
-        patch(
-            "app.scanner.profiles.get_scanners",
-            return_value=[Scanner(id="Nospe Virtual Scanner", name="Nospe Virtual Scanner")],
-        ),
-        patch("app.scanner.twain_scan.perform_scan", return_value=pdf_path) as perform_scan,
+        patch("app.main.registry.resolve", return_value=VIRTUAL),
+        patch("app.main.scan_service.perform_scan", return_value=pdf_path) as perform_scan,
         patch("app.settings.get_raw_settings", return_value={"scan_output_dir": str(tmp_path)}),
     ):
-        response = TestClient(app).post(
+        response = make_client().post(
             "/scan",
             json={
                 "scanner_id": "Nospe Virtual Scanner",

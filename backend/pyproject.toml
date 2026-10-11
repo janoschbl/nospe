@@ -10,9 +10,11 @@ dependencies = [
   "python-multipart==0.0.20",
   "pypdfium2==5.9.0",
   "Pillow==11.0.0",
-  "pytest==8.3.4",
   "httpx==0.28.1",
   "pytwain>=2.3.0",
+  "zeroconf>=0.132",
+  "defusedxml>=0.7.1",
+  "pywin32>=306; sys_platform == 'win32'",
 ]
 
 [tool.uv]
@@ -21,4 +23,5 @@ package = false
 [dependency-groups]
 dev = [
   "pyinstaller==6.14.1",
+  "pytest==8.3.4",
 ]

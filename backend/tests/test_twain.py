@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from fastapi.testclient import TestClient
+from conftest import make_client
 
 from app.main import app
 from app.models import Scanner
@@ -99,7 +99,7 @@ def test_scanners_status_endpoint():
         sources=("EPSON DS-410",),
     )
     with patch.object(twain_sources, "get_twain_status", return_value=status):
-        client = TestClient(app)
+        client = make_client()
         response = client.get("/scanners/status")
 
     assert response.status_code == 200
@@ -110,13 +110,21 @@ def test_scanners_status_endpoint():
     assert body["sources"] == ["EPSON DS-410"]
 
 
-def test_scanners_endpoint_uses_list_scanners():
-    with patch(
-        "app.scanner.profiles.list_scanners",
-        return_value=[Scanner(id="Test DS", name="Test DS")],
-    ):
-        client = TestClient(app)
-        response = client.get("/scanners")
+def test_scanners_endpoint_reads_registry_snapshot():
+    from app.main import registry
+    from app.scanner.registry import Snapshot
+    from app.scanner.scanner_types import DiscoveredScanner
+
+    snapshot = Snapshot(
+        scanners=[DiscoveredScanner(kind="twain", native_id="Test DS", name="Test DS")],
+        errors={},
+        updated_at=1.0,
+        scanning=False,
+    )
+    with patch.object(registry, "snapshot", return_value=snapshot):
+        response = make_client().get("/scanners")
 
     assert response.status_code == 200
-    assert response.json()["scanners"] == [{"id": "Test DS", "name": "Test DS"}]
+    body = response.json()
+    assert body["scanners"] == [{"id": "twain:Test DS", "name": "Test DS", "kind": "twain", "also_via": []}]
+    assert body["scanning"] is False

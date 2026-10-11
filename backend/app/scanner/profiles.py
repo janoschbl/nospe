@@ -1,9 +1,8 @@
-"""Scan-Profile (fest) und Scanner-Liste über TWAIN (Phase 1)."""
+"""Feste Scan-Profile."""
 
 from __future__ import annotations
 
-from ..models import ScanProfile, Scanner
-from .twain_sources import list_scanners
+from ..models import ScanProfile
 
 DEFAULT_PROFILES: list[ScanProfile] = [
     ScanProfile(
@@ -23,11 +22,6 @@ DEFAULT_PROFILES: list[ScanProfile] = [
         color_mode="color",
     ),
 ]
-
-
-def get_scanners() -> list[Scanner]:
-    """Listet verfügbare TWAIN-Quellen (64-bit DSM unter Windows)."""
-    return list_scanners()
 
 
 def get_profiles() -> list[ScanProfile]:

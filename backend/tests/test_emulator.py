@@ -42,7 +42,7 @@ startxref
 
 def client_with_spool(monkeypatch, tmp_path: Path) -> TestClient:
     monkeypatch.setenv("NOSPE_EMULATOR_SPOOL_DIR", str(tmp_path / "spool"))
-    return TestClient(app)
+    return TestClient(app, base_url="http://127.0.0.1:8766")
 
 
 def test_pdf_upload_creates_active_job_manifest_and_page(monkeypatch, tmp_path):

@@ -13,19 +13,28 @@ from ..models import ScanProfile
 from . import emulator_scan
 from .pdf_builder import images_to_pdf
 from .twain_env import probe_twain_environment
+from .scanner_types import ScanError
+from .twain_lock import twain_session
 
 logger = logging.getLogger(__name__)
 
 _FILENAME_SAFE = re.compile(r"[^\w\-.]+", re.UNICODE)
-
-
-class ScanError(Exception):
-    """Scan fehlgeschlagen (für HTTP 400/503)."""
+TEMP_PREFIX = "nospe-scan-"
+_RESERVED_NAMES = {
+    "con", "prn", "aux", "nul",
+    *(f"com{i}" for i in range(1, 10)),
+    *(f"lpt{i}" for i in range(1, 10)),
+}
+MAX_TITLE_LENGTH = 120
 
 
 def _sanitize_title(title: str) -> str:
-    cleaned = _FILENAME_SAFE.sub("_", title.strip())
-    return cleaned.strip("._") or "scan"
+    cleaned = _FILENAME_SAFE.sub("_", title.strip())[:MAX_TITLE_LENGTH]
+    cleaned = cleaned.strip("._") or "scan"
+    # Windows-Gerätenamen (CON, NUL, COM1 …) würden auf ein Gerät statt in eine Datei schreiben.
+    if cleaned.split(".")[0].casefold() in _RESERVED_NAMES:
+        cleaned = f"scan_{cleaned}"
+    return cleaned
 
 
 def resolve_output_path(output_dir: Path, title: str) -> Path:
@@ -107,17 +116,18 @@ def _apply_profile(source, profile: ScanProfile) -> None:
 def _acquire_images(
     product_name: str,
     profile: ScanProfile,
+    workdir: Path,
     *,
     show_ui: bool = False,
 ) -> list[Path]:
+    """Scannt in ``workdir``. Der Aufrufer räumt das Verzeichnis auch bei Fehlern auf."""
     import twain
 
     images: list[Path] = []
-    temp_dir = Path(tempfile.mkdtemp(prefix="nospe-scan-"))
 
     def after(image, remaining: int) -> None:
         page_index = len(images) + 1
-        bmp_path = temp_dir / f"page-{page_index:04d}.bmp"
+        bmp_path = workdir / f"page-{page_index:04d}.bmp"
         image.save(str(bmp_path))
         image.close()
         images.append(bmp_path)
@@ -127,16 +137,19 @@ def _acquire_images(
             remaining,
         )
 
-    with twain.SourceManager() as sm:
-        source = sm.open_source(product_name=product_name)
-        if source is None:
-            raise ScanError(f'TWAIN-Quelle „{product_name}" nicht gefunden.')
+    # Der DSM ist nicht nebenläufig sicher: während des Scans darf weder die
+    # Quellenliste noch die Umgebungsprüfung den SourceManager öffnen.
+    with twain_session():
+        with twain.SourceManager() as sm:
+            source = sm.open_source(product_name=product_name)
+            if source is None:
+                raise ScanError(f'TWAIN-Quelle „{product_name}" nicht gefunden.')
 
-        try:
-            _apply_profile(source, profile)
-            source.acquire_natively(after=after, show_ui=show_ui, modal=False)
-        finally:
-            source.close()
+            try:
+                _apply_profile(source, profile)
+                source.acquire_natively(after=after, show_ui=show_ui, modal=False)
+            finally:
+                source.close()
 
     if not images:
         raise ScanError("TWAIN-Scan lieferte keine Seiten.")
@@ -159,22 +172,15 @@ def _scan_via_twain(
         "yes",
     }
 
-    page_files: list[Path] = []
-    try:
-        page_files = _acquire_images(scanner_id, profile, show_ui=show_ui)
-        images_to_pdf(page_files, output_path)
-    finally:
-        if page_files:
-            temp_dir = page_files[0].parent
-            for path in page_files:
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            try:
-                temp_dir.rmdir()
-            except OSError:
-                pass
+    # Gescannte Seiten sind vertraulich: das Verzeichnis wird in jedem Fall
+    # gelöscht, auch wenn der Scan mittendrin (Papierstau, Abbruch) scheitert.
+    with tempfile.TemporaryDirectory(prefix=TEMP_PREFIX, ignore_cleanup_errors=True) as tmp:
+        page_files = _acquire_images(scanner_id, profile, Path(tmp), show_ui=show_ui)
+        try:
+            images_to_pdf(page_files, output_path)
+        except Exception:
+            output_path.unlink(missing_ok=True)
+            raise
 
     if emulator_scan.is_virtual_scanner(scanner_id):
         try:
@@ -185,6 +191,27 @@ def _scan_via_twain(
             logger.debug("Emulator-Spool nach TWAIN-Scan nicht geleert", exc_info=True)
 
     return output_path
+
+
+def sweep_stale_scan_dirs(max_age_seconds: float = 3600.0) -> int:
+    """Löscht liegengebliebene Scan-Temp-Verzeichnisse (z. B. nach hartem Beenden)."""
+    import shutil
+    import time
+
+    removed = 0
+    root = Path(tempfile.gettempdir())
+    try:
+        candidates = list(root.glob(f"{TEMP_PREFIX}*"))
+    except OSError:
+        return 0
+    for path in candidates:
+        try:
+            if path.is_dir() and time.time() - path.stat().st_mtime > max_age_seconds:
+                shutil.rmtree(path, ignore_errors=True)
+                removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 def perform_scan(

@@ -1,20 +1,24 @@
 """Nospe FastAPI Backend.
 
 Stellt die Endpunkte bereit, gegen die das Tauri/React-Frontend spricht.
-TWAIN-Quellenauflistung und Scan/PDF sind implementiert; Paperless-Upload ist noch Stub.
+Gesichert wird die API durch ``security.SecurityMiddleware`` (Secret-Header,
+Host- und Origin-Prüfung); Details dort.
 
 Start:  uv run python run_backend.py
-        (oder: uv run uvicorn app.main:app --host 127.0.0.1 --port 8765)
 """
 
 from __future__ import annotations
 
+import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
+from . import security
+from . import settings as settings_store
 from .models import (
     AppSettings,
     HealthResponse,
@@ -22,34 +26,72 @@ from .models import (
     ProfilesResponse,
     SaveSettingsRequest,
     ScanRequest,
+    Scanner,
     ScannersResponse,
     ScanResponse,
     TwainStatusResponse,
 )
 from .paperless import client as paperless_client
 from .scanner import profiles as scanner_profiles
-from .scanner import twain_scan
+from .scanner import scan_service, twain_scan
 from .scanner import twain_sources as twain_sources_mod
-from . import settings as settings_store
+from .scanner.escl_backend import EsclBackend
+from .scanner.registry import ScannerRegistry
+from .scanner.scanner_types import ScanError
+from .scanner.twain_backend import TwainBackend
+from .scanner.twain_lock import TwainBusy
+from .scanner.wia_backend import WiaBackend
 
-app = FastAPI(title="Nospe Backend", version=__version__)
+logger = logging.getLogger(__name__)
 
-# CORS: Vite-Dev (5173) und Tauri-WebView (tauri://, http://tauri.localhost).
-# Im MVP großzügig, damit Entwicklung nicht blockiert wird.
+registry = ScannerRegistry(
+    [TwainBackend(), WiaBackend(), EsclBackend()],
+    scan_active=scan_service.scan_active,
+)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    twain_scan.sweep_stale_scan_dirs()
+    registry.start()
+    try:
+        yield
+    finally:
+        registry.stop()
+
+
+# Keine automatische Doku (/docs, /openapi.json): unnötige Angriffsfläche.
+app = FastAPI(
+    title="Nospe Backend",
+    version=__version__,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+    lifespan=lifespan,
+)
+
+# Reihenfolge: zuletzt hinzugefügt = außen. CORS beantwortet Preflights, bevor
+# die Sicherheitsprüfung greift; jede echte Anfrage läuft danach durch sie.
+app.add_middleware(security.SecurityMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "tauri://localhost",
-        "http://tauri.localhost",
-        "https://tauri.localhost",
+        *security.RELEASE_ORIGINS,
+        *(security.DEV_ORIGINS if security.dev_mode_enabled() else ()),
     ],
-    allow_origin_regex=r"^(https?://localhost(:\d+)?|https?://127\.0\.0\.1(:\d+)?|tauri://localhost)$",
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", security.TOKEN_HEADER_CANONICAL],
 )
+
+
+def _scanner_model(scanner) -> Scanner:
+    return Scanner(
+        id=scanner.id,
+        name=scanner.name,
+        kind=scanner.kind,
+        also_via=list(scanner.also_via),
+    )
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -58,13 +100,40 @@ def health() -> HealthResponse:
 
 
 @app.get("/scanners", response_model=ScannersResponse)
-def scanners() -> ScannersResponse:
-    return ScannersResponse(scanners=scanner_profiles.get_scanners())
+def scanners(refresh: bool = False) -> ScannersResponse:
+    """Aktuelle Geräteliste aus dem Cache der Registry.
+
+    Beim allerersten Aufruf (oder mit ``?refresh=true``) wird einmal synchron
+    gesucht; sonst antwortet der Endpunkt sofort, auch während eines Scans.
+    """
+    snapshot = registry.snapshot()
+    if refresh or snapshot.updated_at is None:
+        registry.refresh(force=True)
+        snapshot = registry.snapshot()
+    return ScannersResponse(
+        scanners=[_scanner_model(s) for s in snapshot.scanners],
+        updated_at=snapshot.updated_at,
+        scanning=snapshot.scanning,
+        errors=snapshot.errors,
+    )
 
 
 @app.get("/scanners/status", response_model=TwainStatusResponse)
 def scanners_status() -> TwainStatusResponse:
-    status = twain_sources_mod.get_twain_status()
+    try:
+        status = twain_sources_mod.get_twain_status(blocking=False)
+    except TwainBusy:
+        # Es wird gerade gescannt: nichts am DSM anfassen, Cache zeigen.
+        snapshot = registry.snapshot()
+        names = [s.name for s in snapshot.scanners if s.kind == "twain"]
+        return TwainStatusResponse(
+            platform="",
+            python_bitness=64,
+            twain_supported=True,
+            dsm_available=True,
+            source_count=len(names),
+            sources=names,
+        )
     env = status.environment
     return TwainStatusResponse(
         platform=env.platform,
@@ -91,21 +160,25 @@ def read_settings() -> AppSettings:
 
 @app.post("/settings", response_model=AppSettings)
 def write_settings(request: SaveSettingsRequest) -> AppSettings:
-    return settings_store.save_settings(request)
+    try:
+        return settings_store.save_settings(request)
+    except settings_store.SettingsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/paperless/test", response_model=PaperlessTestResponse)
 def paperless_test() -> PaperlessTestResponse:
     raw = settings_store.get_raw_settings()
-    return paperless_client.test_connection(
-        url=raw.get("paperless_url", ""),
-        token=raw.get("paperless_token", ""),
-    )
+    try:
+        url = settings_store.validate_paperless_url(raw.get("paperless_url", ""))
+    except settings_store.SettingsError as exc:
+        return PaperlessTestResponse(ok=False, message=str(exc))
+    return paperless_client.test_connection(url=url, token=raw.get("paperless_token", ""))
 
 
 @app.post("/scan", response_model=ScanResponse)
 def scan(request: ScanRequest) -> ScanResponse:
-    """TWAIN-Scan: Bilder erfassen, PDF schreiben, optional Paperless.
+    """Scan: Bilder erfassen, PDF schreiben, optional Paperless.
 
     Grundregel: Ein Paperless-Fehler darf den lokalen Scan nicht verlieren.
     """
@@ -119,26 +192,35 @@ def scan(request: ScanRequest) -> ScanResponse:
     if request.color_mode is not None:
         profile = profile.model_copy(update={"color_mode": request.color_mode})
 
-    scanner_ids = {scanner.id for scanner in scanner_profiles.get_scanners()}
-    if request.scanner_id not in scanner_ids:
+    scanner = registry.resolve(request.scanner_id)
+    if scanner is None:
         raise HTTPException(
             status_code=400,
             detail=f"Scanner nicht verfügbar: {request.scanner_id}",
         )
 
     raw = settings_store.get_raw_settings()
-    output_dir = Path(raw.get("scan_output_dir", str(Path.home())))
+    try:
+        output_dir = Path(
+            settings_store.validate_output_dir(raw.get("scan_output_dir", str(Path.home())))
+        )
+    except settings_store.SettingsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
-        pdf_path = twain_scan.perform_scan(
-            scanner_id=request.scanner_id,
+        pdf_path = scan_service.perform_scan(
+            registry=registry,
+            scanner=scanner,
             profile=profile,
             title=request.title,
             output_dir=output_dir,
         )
-    except twain_scan.ScanError as exc:
+    except scan_service.ScanInProgress as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ScanError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
+        logger.exception("Scan fehlgeschlagen")
         raise HTTPException(
             status_code=500,
             detail=f"Scan fehlgeschlagen: {exc}",
@@ -154,7 +236,7 @@ def scan(request: ScanRequest) -> ScanResponse:
     if request.push_to_paperless:
         try:
             doc_id = paperless_client.upload_document(
-                url=raw.get("paperless_url", ""),
+                url=settings_store.validate_paperless_url(raw.get("paperless_url", "")),
                 token=raw.get("paperless_token", ""),
                 file_path=file_path,
                 title=request.title,

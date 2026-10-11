@@ -19,12 +19,23 @@ class HealthResponse(BaseModel):
 
 
 class Scanner(BaseModel):
+    #: Eindeutig und stabil: ``twain:<Name>``, ``wia:<DeviceID>`` oder ``escl:<UUID>``.
     id: str
     name: str
+    #: Zugangsart: "twain" | "wia" | "escl"
+    kind: str = "twain"
+    #: Weitere Zugänge zum selben Gerät (z. B. WIA-ID, wenn TWAIN bevorzugt wurde).
+    also_via: list[str] = []
 
 
 class ScannersResponse(BaseModel):
     scanners: list[Scanner]
+    #: Unix-Zeit des letzten Suchlaufs; ``None`` solange noch nie gesucht wurde.
+    updated_at: Optional[float] = None
+    #: Läuft gerade ein Scan? Dann ist die Liste der Stand vor dem Scan.
+    scanning: bool = False
+    #: Fehler je Zugangsart, z. B. ``{"twain": "TWAIN DSM nicht ladbar"}``.
+    errors: dict[str, str] = {}
 
 
 class TwainStatusResponse(BaseModel):
