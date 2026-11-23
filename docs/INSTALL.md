@@ -41,11 +41,12 @@ Mehr dazu und zur Bitness-Prüfung: [TWAIN_SETUP.md](TWAIN_SETUP.md).
 ## 3. Quellcode holen und prüfen
 
 ```powershell
-git clone https://github.com/<user>/nospe.git
+git clone https://github.com/janoschbl/nospe.git
 cd nospe\backend
 uv sync
 uv run python -m pytest -q
 uv run python scripts/verify_twain.py
+cd ..
 ```
 
 `verify_twain.py` sollte Exit-Code 0 liefern und deinen Scanner nennen. Andere Codes: siehe [TWAIN_SETUP.md](TWAIN_SETUP.md#verifikation-phase-0).

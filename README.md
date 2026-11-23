@@ -1,103 +1,166 @@
+<div align="center">
+
 # Nospe
 
-Windows-App für den Epson DS-410 und andere Scanner: scannen, PDF erzeugen, optional zu **Paperless-ngx** hochladen.
+**Dokumente scannen, als PDF speichern und direkt zu Paperless-ngx schicken.**
 
-```
-Tauri 2 App (React/TypeScript)
-   │  Tauri-Kommando backend_config  →  Port + Secret (pro Start zufällig)
-   ▼
-Python FastAPI Backend (Sidecar, nur 127.0.0.1, Header X-Nospe-Token)
-   ├─ TWAIN  (pytwain, 64 Bit)        Epson Scan 2 u. a.
-   ├─ WIA 2.0 (COM, pywin32)          alles, was Windows als Scanner kennt
-   └─ eSCL/AirScan (mDNS, httpx)      Netzwerkscanner ohne Treiber
-   ▼
-lokale PDF  →  optional Paperless-ngx (POST /api/documents/post_document/)
-```
+Eine kleine Windows-App für den Epson DS-410 und weitere Scanner.
 
-## Status
+[Selbst bauen und betreiben](#selbst-bauen-und-betreiben) · [Entwicklung](#entwicklung)
 
-| Bereich | Stand |
-|---------|-------|
-| Backend, Sicherheitsmodell, Scanner-Registry | implementiert, 152 automatisierte Tests (Linux, mit Mocks) |
-| TWAIN-Scan (Epson DS-410) | implementiert, vor dem Einsatz am echten Gerät testen |
-| WIA- und eSCL-Scan | implementiert, **nur gegen simulierte Geräte getestet** |
-| DPAPI-Tokenverschlüsselung, Tauri-Host (Rust) | **auf Windows noch nicht ausgeführt/kompiliert** |
-| Virtueller Scanner (`twain_ds/`) | Entwicklungswerkzeug, nicht produktionsreif |
+</div>
 
-Die Punkte „nicht getestet“ sind die erste Aufgabe beim ersten Windows-Lauf, siehe [Checkliste](docs/INSTALL.md#7-erster-test-checkliste).
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/scannen.png" width="459" alt="Nospe mit Scanner-Auswahl, Dateiname, Zielordner und Scan-Button"></td>
+<td width="50%"><img src="docs/screenshots/paperless.png" width="459" alt="Paperless-Einstellungen mit Beispiel-URL, gespeichertem Token und Verbindungstest"></td>
+</tr>
+</table>
 
-## Quickstart (Entwicklung auf Windows)
+<sub>Aktuelle Oberfläche mit Demo-Scanner und Beispielwerten. Die Bilder zeigen keinen echten Scan oder Upload.</sub>
 
-Voraussetzungen: Windows 10/11 x64, [uv](https://docs.astral.sh/uv/), Node.js 20+, Rust (stable, MSVC), 64-bit-TWAIN-DSM und Scanner-Treiber (Details in [docs/INSTALL.md](docs/INSTALL.md)).
+## Warum Nospe?
+
+Ich habe Nospe für meinen Epson DS-410 gebaut. Ich wollte eigentlich nur Dokumente scannen und direkt in Paperless-ngx ablegen. Das fast ein Jahrzehnt alte UI der Epson-App hat mich dabei ziemlich genervt.
+
+Also habe ich mir eine eigene kleine App geschrieben. Nospe ist ein Hobbyprojekt, das ich hauptsächlich für mich gebaut und dann einfach veröffentlicht habe.
+
+- PDFs im eigenen Zielordner speichern, mit eigenem Dateinamen oder automatisch mit Datum und Uhrzeit.
+- Scans optional direkt an die eigene Paperless-ngx-Instanz schicken. Die lokale PDF bleibt erhalten.
+- Farbe, Graustufen oder Schwarzweiß auswählen. Scan-Profile für einseitigen Einzug und Duplex sind dabei.
+
+Aktuell ist Nospe im Entwicklungsstand. Es gibt noch keinen fertigen Release-Download. Die Windows- und Hardware-Prüfungen stehen unten unter [Stand und Grenzen](#stand-und-grenzen).
+
+## Selbst bauen und betreiben
+
+Nospe läuft auf deinem Windows-Rechner. Die Desktop-App startet ihr FastAPI-Backend lokal und beendet es beim Schließen wieder. Der Zugriff bleibt auf `127.0.0.1` beschränkt.
+
+### Voraussetzungen
+
+- Windows 10 oder 11, 64 Bit.
+- Ein Scanner mit TWAIN- oder WIA-Treiber oder ein eSCL/AirScan-Netzwerkscanner. Für den Epson DS-410 sind Epson Scan 2 und der 64-Bit-TWAIN-DSM vorgesehen.
+- Zum Bauen Git, Python 3.11+ über `uv`, Node.js 20+, Rust mit MSVC und die Visual Studio Build Tools mit C++-Workload.
+
+Die Einrichtung der Werkzeuge und Treiber steht in der [Installationsanleitung](docs/INSTALL.md). Die [TWAIN-Anleitung](docs/TWAIN_SETUP.md) erklärt DSM und Treiber-Bitness.
+
+### Windows-Installer bauen
+
+In PowerShell, nach der Einrichtung der Voraussetzungen:
 
 ```powershell
-git clone https://github.com/<user>/nospe.git
-cd nospe
+git clone https://github.com/janoschbl/nospe.git
+cd nospe\backend
+uv sync
+uv run python -m pytest -q
+uv run python scripts/verify_twain.py
+uv run pyinstaller --clean --noconfirm --distpath ..\frontend\src-tauri\binaries --workpath build\pyinstaller nospe_backend.spec
 
-# 1. Backend vorbereiten und prüfen
+cd ..\frontend\src-tauri
+Copy-Item binaries\nospe-backend.exe binaries\nospe-backend-x86_64-pc-windows-msvc.exe -Force
+cargo check
+
+cd ..
+npm ci
+npm run tauri build
+```
+
+Der Installer liegt danach unter `frontend\src-tauri\target\release\bundle\nsis\`. Vor der Installation eine laufende Nospe-App schließen. Beim normalen App-Start werden Port und Secret automatisch erzeugt.
+
+### Die eigene Paperless-Instanz anbinden
+
+1. In Nospe die **Einstellungen** öffnen und den **Zielordner** für die PDFs setzen.
+2. Unter **Paperless** die URL und einen API-Token der eigenen Paperless-ngx-Instanz eintragen und **Speichern** wählen.
+3. Mit **Verbindung testen** prüfen, ob die gespeicherten Zugangsdaten funktionieren.
+4. Auf der Hauptseite **Paperless** aktivieren und scannen.
+
+Die Paperless-Instanz betreibst du unabhängig von Nospe. Sie kann im eigenen Netz oder über HTTPS erreichbar sein. `http://` ist auf lokale Adressen beschränkt. Nospe bringt keinen Paperless-Server mit.
+
+Einstellungen liegen unter `%APPDATA%\Nospe\config.json`. Der Paperless-Token wird unter Windows per DPAPI verschlüsselt und an die konfigurierte Server-URL gebunden. Nach einem Wechsel des Servers muss er neu eingegeben werden.
+
+## Entwicklung
+
+Die Oberfläche besteht aus React, TypeScript und Tauri 2. Das Python-Backend nutzt FastAPI und erzeugt die PDFs. Scanner werden über TWAIN, WIA 2.0 oder eSCL/AirScan gefunden. Tauri übergibt der Oberfläche die lokale Backend-Adresse und das Secret.
+
+### Backend starten
+
+Im geklonten Repo, Terminal 1:
+
+```powershell
 cd backend
 uv sync
-uv run python -m pytest -q          # 152 Tests
-uv run python scripts/verify_twain.py
-
-# 2. Backend starten (Terminal 1) - gibt Port und Secret aus
 $env:NOSPE_DEV = "1"
+$env:NOSPE_API_PORT = "8765"
 $env:NOSPE_API_SECRET = "dev-secret-0123456789abcdef"
 uv run python run_backend.py
+```
 
-# 3. App starten (Terminal 2), gegen dieses Backend
-cd ..\frontend
-npm install
+Das feste Secret ist ein Beispiel für lokale Entwicklung. Bei der installierten App übernimmt Tauri den Handshake mit einem zufälligen Secret pro Start.
+
+### Desktop-App starten
+
+Im Repo-Ordner, in einem zweiten Terminal:
+
+```powershell
+cd frontend
+npm ci
 $env:NOSPE_API_PORT = "8765"
 $env:NOSPE_API_SECRET = "dev-secret-0123456789abcdef"
 npm run tauri dev
 ```
 
-Nur die Oberfläche im Browser (ohne Tauri): `VITE_NOSPE_API_URL=http://127.0.0.1:8765` und `VITE_NOSPE_API_SECRET=<Secret>` setzen, dann `npm run dev` (http://localhost:5173).
+### Oberfläche im Browser starten
 
-Auf Linux/macOS laufen Backend-Tests und die Web-UI; gescannt wird nur unter Windows.
+Alternativ zum Tauri-Host, im Ordner `frontend`:
 
-## Installation für Anwender
-
-Installer bauen und installieren: [docs/INSTALL.md](docs/INSTALL.md).
-
-## Projektstruktur
-
-```
-backend/        FastAPI, Scanner-Backends, PDF, Einstellungen, Paperless
-  app/scanner/    registry.py, twain_*.py, wia_backend.py, escl_backend.py, scan_service.py
-  app/security.py Secret-, Host- und Origin-Prüfung
-  app/settings.py Konfiguration, URL-/Pfad-Validierung, DPAPI-Token
-frontend/       React + Vite UI
-  src-tauri/      Rust-Host: startet den Sidecar, übergibt Port/Secret
-twain_ds/       Virtueller TWAIN-Scanner (C++, nur Entwicklung)
-docs/           TWAIN-Setup, Installationsanleitung
-DEVELOPMENT.md  Architektur, Sicherheitsmodell, Release-Ablauf
+```powershell
+npm ci
+$env:VITE_NOSPE_API_URL = "http://127.0.0.1:8765"
+$env:VITE_NOSPE_API_SECRET = "dev-secret-0123456789abcdef"
+npm run dev
 ```
 
-## Sicherheit in Kürze
+Die Oberfläche läuft unter `http://localhost:5173`. Backend-Tests und Web-UI lassen sich auch unter Linux und macOS ausführen. Der dokumentierte Betrieb mit Scanner ist auf Windows ausgelegt.
 
-- Das Backend lauscht nur auf `127.0.0.1`, mit **zufälligem Port und Secret pro Start**; jede Anfrage braucht `X-Nospe-Token`. `Host`- und `Origin`-Prüfung gegen DNS-Rebinding und fremde Webseiten.
-- Der Paperless-Token liegt nur DPAPI-verschlüsselt in `%APPDATA%\Nospe\config.json` und ist an die Paperless-Server-URL gebunden.
-- Scan-Zwischendateien werden auch bei Fehlern gelöscht.
+### Tests und Build
 
-Details: [DEVELOPMENT.md](DEVELOPMENT.md#sicherheitsmodell-der-lokalen-api).
+Die Befehle beginnen jeweils im Repo-Ordner:
 
-## API (nur über die App/mit Secret erreichbar)
+```powershell
+cd backend
+uv run python -m pytest -q
 
-| Methode | Pfad               | Zweck                                                   |
-|---------|--------------------|---------------------------------------------------------|
-| GET     | `/health`          | `{ ok, version }`                                       |
-| GET     | `/scanners`        | Geräte aller Zugänge aus dem Cache (`?refresh=true` erzwingt Suche) |
-| GET     | `/scanners/status` | TWAIN-Diagnose (Bitness, DSM, Quellen, Hinweise)        |
-| GET     | `/profiles`        | Scan-Profile (Duplex Grau / Simplex Farbe)              |
-| POST    | `/scan`            | Scan ausführen, PDF-Pfad zurückgeben                    |
-| GET/POST| `/settings`        | Einstellungen (Token nie im Klartext)                   |
-| POST    | `/paperless/test`  | Verbindung zu Paperless-ngx prüfen                      |
+cd ..\frontend
+npm run build
+
+cd src-tauri
+cargo check
+```
+
+### Projektstruktur
+
+| Pfad | Inhalt |
+| --- | --- |
+| `frontend/src/` | Oberfläche, API-Client und TypeScript-Typen |
+| `frontend/src-tauri/` | Rust-Host, Sidecar-Start und Installer-Konfiguration |
+| `backend/app/` | FastAPI, Scanner-Zugänge, PDF, Einstellungen und Paperless-Upload |
+| `backend/app/security.py` | Secret-, Host- und Origin-Prüfung der lokalen API |
+| `twain_ds/` | Virtueller TWAIN-Scanner für die Entwicklung |
+| `docs/` | Installation, TWAIN-Setup und Screenshots |
+
+## Stand und Grenzen
+
+- Backend, Scanner-Registry und Sicherheitsmodell sind implementiert und mit automatisierten Tests unter Linux und simulierten Geräten geprüft.
+- TWAIN für den Epson DS-410 ist implementiert. Der Ablauf muss am echten Gerät geprüft werden.
+- WIA und eSCL sind bislang nur gegen simulierte Geräte getestet.
+- Rust-Host und DPAPI-Tokenverschlüsselung sind laut bisherigem Projektstand noch nicht unter Windows ausgeführt beziehungsweise kompiliert worden.
+- Einige sichtbare Optionen sind bislang nur UI-Einstellungen, darunter Drehung, Spiegeln, Entzerren und zusätzliche Dateiformate. Der Backend-Scan erzeugt PDFs; Profil und Farbmodus werden übergeben.
+- Der virtuelle Scanner ist ein Entwicklungswerkzeug.
+
+Die [Checkliste für den ersten Windows-Test](docs/INSTALL.md#7-erster-test-checkliste) beschreibt die noch offenen Prüfungen.
 
 ## Weitere Dokumentation
 
-- [docs/INSTALL.md](docs/INSTALL.md): Voraussetzungen, Bauen, Installieren, Fehlersuche
-- [docs/TWAIN_SETUP.md](docs/TWAIN_SETUP.md): TWAIN-DSM und Epson-Treiber
-- [DEVELOPMENT.md](DEVELOPMENT.md): Architektur, Sicherheitsmodell, Emulator, Release
-- [twain_ds/README.md](twain_ds/README.md): virtueller Scanner
+- [Installation und Fehlersuche](docs/INSTALL.md)
+- [TWAIN-DSM und Epson-Treiber](docs/TWAIN_SETUP.md)
+- [Architektur, lokale API, Sicherheitsmodell und Release-Ablauf](DEVELOPMENT.md)
+- [Virtueller TWAIN-Scanner](twain_ds/README.md)
